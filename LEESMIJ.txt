@@ -1,0 +1,39 @@
+LP-ZOEKER — offline LP-opzoeker voor iPhone
+===========================================
+
+STAP 1 — Sheet publiceren als CSV (Google, 2 min, eenmalig)
+  1. Open de Google Sheet met de LP-bibliotheek
+  2. Bestand → Delen → Publiceren op internet
+  3. Links: kies het TABBLAD met de LP's (niet "Hele document")
+     Rechts: kies "Door komma's gescheiden waarden (.csv)"
+  4. Klik Publiceren → bevestig → kopieer de link (eindigt op output=csv)
+  5. Test: open de link in je browser → je hoort een tekstbestand te downloaden/zien
+     dat begint met ID,Artiest,Album,...
+  Wijzigingen in de sheet komen automatisch mee (Google ververst dit binnen enkele minuten).
+  Let op: wie de (lange, onvoorspelbare) link kent, kan de lijst lezen. Stoppen kan altijd via
+  dezelfde menu-optie → "Publicatie stoppen".
+  (Alternatief: de Apps Script-export in LP-Export.gs, als die bij jou wél werkt.)
+
+STAP 2 — App online zetten (gratis, eenmalig) via GitHub Pages
+  1. Maak een gratis account op github.com
+  2. "+" → New repository → naam: lp-zoeker → Public → Create
+  3. "uploading an existing file" → sleep ALLE bestanden en mappen uit deze map
+     (index.html, app.js, sw.js, manifest.webmanifest, icons/, vendor/) → Commit
+  4. Settings → Pages → Branch: main, map: / (root) → Save
+  5. Na ±1 minuut staat de app op  https://JOUWNAAM.github.io/lp-zoeker/
+  (De app-bestanden bevatten géén gegevens van jullie collectie; die komen via de export-link met token.)
+
+STAP 3 — Op de iPhone installeren (met internet)
+  1. Open de link in Safari → Deel-knop → "Zet op beginscherm"
+  2. Open de app VIA HET BEGINSCHERM-ICOON (belangrijk: dan blijven de gegevens bewaard)
+  3. ⚙︎ → plak de CSV-link → "Link bewaren" → de bibliotheek wordt opgehaald
+  4. ⚙︎ → "Tekstherkenning nu al klaarzetten"
+  5. Test: zet vliegtuigmodus aan, sluit de app volledig en open opnieuw → zoeken moet werken
+
+GEBRUIK
+  - Typen: zoekt meteen in artiest, album, label, jaar. Tikfouten worden opgevangen.
+    Groen = hebben we al · Geel = lijkt erop · Rood = niet in de collectie
+  - 📷: hoes in het kader houden → foto → de app leest de tekst én vergelijkt de hoes met jullie covers
+  - Alternatief (ingebouwd in iOS, ook offline): houd het zoekveld ingedrukt → "Scan tekst"
+  - Bijwerken: gebeurt automatisch op de achtergrond als er internet is (max. 1× per 12 u),
+    of manueel via ⚙︎ → "Nu bijwerken". Zonder internet blijft de laatst bewaarde versie werken.
