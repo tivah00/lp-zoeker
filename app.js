@@ -3,7 +3,7 @@
  * de app zelf zit in de cache van de service worker. */
 'use strict';
 
-const APP_VERSIE = '1.1.0';
+const APP_VERSIE = '1.2.0';
 const MAX_TONEN = 40;
 const THUMB_PX = 112;
 
@@ -269,14 +269,19 @@ function fpAfstand(a, b) {
 }
 
 /* ───────────────────────── Afbeeldingen ───────────────────────── */
-function laadImg(src) {
+function laadImg(src, ms = 15000) {
   return new Promise((res, rej) => {
     const im = new Image();
     if (/^https?:/i.test(src)) im.crossOrigin = 'anonymous';
-    im.onload = () => res(im); im.onerror = () => rej(new Error('img'));
+    const t = setTimeout(() => { im.src = ''; rej(new Error('time-out')); }, ms);
+    im.onload = () => { clearTimeout(t); res(im); };
+    im.onerror = () => { clearTimeout(t); rej(new Error('img')); };
     im.src = src;
   });
 }
+/** Gratis beeld-proxy die CORS toestaat en verkleint — enkel gebruikt tijdens bijwerken,
+ *  voor covers waarvan de oorspronkelijke site het kopiëren blokkeert. */
+const proxyUrl = u => 'https://wsrv.nl/?url=' + encodeURIComponent(u.replace(/^https?:\/\//, '')) + '&w=300&h=300&fit=cover&output=jpg&q=80';
 function vierkant(w, h, frac = 1) {
   const s = Math.min(w, h) * frac;
   return [(w - s) / 2, (h - s) / 2, s, s];
@@ -284,21 +289,23 @@ function vierkant(w, h, frac = 1) {
 /** Maakt kleine thumbnail + vingerafdruk van een cover (data-URL of http-URL). */
 async function verwerkCover(src) {
   if (!src) return { thumb: '', fp: null };
-  try {
-    const im = await laadImg(src);
-    const rect = vierkant(im.naturalWidth, im.naturalHeight);
-    const cv = document.createElement('canvas');
-    cv.width = cv.height = THUMB_PX;
-    const cx = cv.getContext('2d');
-    cx.imageSmoothingQuality = 'high';
-    cx.drawImage(im, rect[0], rect[1], rect[2], rect[3], 0, 0, THUMB_PX, THUMB_PX);
-    let thumb, fp = null;
-    try { thumb = cv.toDataURL('image/jpeg', 0.72); fp = vingerafdruk(im, rect); }
-    catch (e) { thumb = src; } // canvas "tainted" (externe URL zonder CORS)
-    return { thumb, fp };
-  } catch (e) {
-    return { thumb: /^https?:/i.test(src) ? src : '', fp: null };
+  src = src.trim();
+  const pogingen = /^https?:/i.test(src) ? [src, proxyUrl(src)] : [src];
+  for (const p of pogingen) {
+    try {
+      const im = await laadImg(p);
+      const rect = vierkant(im.naturalWidth, im.naturalHeight);
+      const cv = document.createElement('canvas');
+      cv.width = cv.height = THUMB_PX;
+      const cx = cv.getContext('2d');
+      cx.imageSmoothingQuality = 'high';
+      cx.drawImage(im, rect[0], rect[1], rect[2], rect[3], 0, 0, THUMB_PX, THUMB_PX);
+      const thumb = cv.toDataURL('image/jpeg', 0.72); // gooit fout als de site kopiëren blokkeert
+      return { thumb, fp: vingerafdruk(im, rect) };
+    } catch (e) { /* volgende poging */ }
   }
+  // Niet lokaal op te slaan: toon enkel online
+  return { thumb: /^https?:/i.test(src) ? src : '', fp: null };
 }
 function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i += 7) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36) + ':' + s.length; }
 
@@ -323,7 +330,7 @@ async function importeerItems(items, bronNaam, progress) {
     it.tk = 't' + i;
     it.ch = it._cover ? hashStr(it._cover) : '';
     const o = it.ch && oud.get(it.ch);
-    if (o && o.key && oudeThumbKeys.has(o.key)) { it.fp = o.fp; it._reuse = o.key; }
+    if (o && o.fp && o.key && oudeThumbKeys.has(o.key)) { it.fp = o.fp; it._reuse = o.key; }
     else if (it._cover) nodig.push(it);
   });
   // Oude thumbs die we hergebruiken ophalen
@@ -671,6 +678,7 @@ async function fotoUitBestand(file) {
 
 /* ───────────────────────── Weergave ───────────────────────── */
 let FOTO = null;
+let KW_MODUS = false;
 let toonAlles = false;
 const THUMBS = new Map();
 const esc = s => String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -733,6 +741,8 @@ function render() {
       Tik op <b>⚙︎</b> om de export-link in te stellen en de bibliotheek op te halen (één keer met internet).</div>`;
     return;
   }
+  zetKwKnop();
+  if (KW_MODUS) return renderKw(out, q);
   if (FOTO && !q.trim()) return renderFoto(out);
   FOTO = null;
   const qt = toks(q);
@@ -750,8 +760,11 @@ function render() {
   const lijst = (exact.length ? exact : fuzzy).filter(r => { const k = LIB[r.i]._key; if (gezien.has(k)) return false; gezien.add(k); return true; });
   const aantalEx = exact.reduce((n, r) => n + 1, 0);
   const uniek = lijst.length;
-  if (exact.length) {
-    html += `<div class="verdict v-ok"><span class="big">✓</span><div>Hebben we al${uniek > 1 ? ` — ${uniek} titels` : ''}<small>${aantalEx} exempla${aantalEx === 1 ? 'ar' : 'ren'} gevonden voor “${esc(q.trim())}”</small></div></div>`;
+  const metKw = lijst.filter(r => LIB[r.i].kringwinkel).length;
+  if (exact.length && metKw && metKw === lijst.length) {
+    html += `<div class="verdict v-kw"><span class="big">🏪</span><div>Hebben we al — maar met een gebrek<small>${lijst.length === 1 ? 'Deze LP staat' : 'Deze LP\'s staan'} op de lijst “te vervangen”: opnieuw kopen kan interessant zijn</small></div></div>`;
+  } else if (exact.length) {
+    html += `<div class="verdict v-ok"><span class="big">✓</span><div>Hebben we al${uniek > 1 ? ` — ${uniek} titels` : ''}<small>${aantalEx} exempla${aantalEx === 1 ? 'ar' : 'ren'} gevonden voor “${esc(q.trim())}”${metKw ? ` · ${metKw} met kringwinkel-opmerking` : ''}</small></div></div>`;
   } else if (fuzzy.length) {
     html += `<div class="verdict v-maybe"><span class="big">?</span><div>Niet exact gevonden<small>Maar dit lijkt erop — controleer de spelling</small></div></div>`;
   } else {
@@ -762,6 +775,32 @@ function render() {
   if (lijst.length > n) html += `<button class="more" id="meer">Toon alle ${lijst.length}</button>`;
   out.innerHTML = html;
   const m = document.getElementById('meer'); if (m) m.onclick = () => { toonAlles = true; render(); };
+  vulThumbs();
+}
+
+function zetKwKnop() {
+  const b = document.getElementById('btnKw');
+  const n = new Set(LIB.filter(it => it.kringwinkel).map(it => it._key)).size;
+  b.style.display = n ? '' : 'none';
+  b.classList.toggle('on', KW_MODUS);
+  b.innerHTML = KW_MODUS ? `🏪 Te vervangen (${n}) <b>✕</b>` : `🏪 Te vervangen <span>${n}</span>`;
+  document.getElementById('q').placeholder = KW_MODUS ? 'Filter in de lijst…' : 'Artiest of album…';
+}
+
+function renderKw(out, q) {
+  const qt = toks(q);
+  let idx = LIB.map((it, i) => i).filter(i => LIB[i].kringwinkel);
+  if (qt.length) {
+    const hit = new Set(zoek(q).exact.map(r => r.i));
+    idx = idx.filter(i => hit.has(i) || norm(LIB[i].kringwinkel).includes(qt.join(' ')));
+  }
+  const gezien = new Set();
+  idx = idx.filter(i => { const k = LIB[i]._key; if (gezien.has(k)) return false; gezien.add(k); return true; })
+    .sort((a, b) => cmpItem(LIB[a], LIB[b]));
+  let html = `<div class="verdict v-kw"><span class="big">🏪</span><div>Te vervangen: ${idx.length} LP${idx.length === 1 ? '' : '\'s'}${qt.length ? ' (gefilterd)' : ''}<small>LP's met een kringwinkel-opmerking (bv. hoes beschadigd). Zie je er één? Dan kan kopen de moeite zijn.</small></div></div>`;
+  if (!idx.length) html += `<div class="empty">Niets gevonden in deze lijst.</div>`;
+  html += idx.map(i => kaart(LIB[i], qt)).join('');
+  out.innerHTML = html;
   vulThumbs();
 }
 
@@ -820,7 +859,7 @@ function toonStatus() {
   if (META) {
     const d = new Date(META.bijgewerkt);
     const dagen = Math.floor((Date.now() - d) / 864e5);
-    st.innerHTML = `<b>${META.aantal}</b> LP's op dit toestel<br>Bijgewerkt: <b>${d.toLocaleString('nl-BE')}</b>${dagen >= 7 ? ` <span style="color:var(--maybe)">(${dagen} dagen geleden)</span>` : ''}<br>Bron: ${esc(META.bron)} · app v${APP_VERSIE}`;
+    st.innerHTML = `<b>${META.aantal}</b> LP's op dit toestel<br>Bijgewerkt: <b>${d.toLocaleString('nl-BE')}</b>${dagen >= 7 ? ` <span style="color:var(--maybe)">(${dagen} dagen geleden)</span>` : ''}<br>Covers offline: <b>${LIB.filter(x => x.fp).length}</b> van ${LIB.filter(x => x.heeftThumb).length}${LIB.some(x => x.heeftThumb && !x.fp) ? ' <span style="color:var(--maybe)">(tik “Nu bijwerken” met goede wifi om de rest op te halen)</span>' : ''}<br>Bron: ${esc(META.bron)} · app v${APP_VERSIE}`;
   }
 }
 
@@ -832,6 +871,7 @@ async function start() {
   q.addEventListener('keydown', e => { if (e.key === 'Enter') q.blur(); });
   document.getElementById('clear').onclick = () => { q.value = ''; FOTO = null; render(); q.focus(); };
   document.getElementById('btnCam').onclick = openCamera;
+  document.getElementById('btnKw').onclick = () => { KW_MODUS = !KW_MODUS; FOTO = null; q.value = ''; toonAlles = false; render(); window.scrollTo(0, 0); };
   document.getElementById('camClose').onclick = stopCamera;
   document.getElementById('camShoot').onclick = neemFoto;
   document.getElementById('camLib').onclick = () => { stopCamera(); document.getElementById('fileCam').click(); };
