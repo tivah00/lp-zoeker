@@ -3,7 +3,7 @@
  * de app zelf zit in de cache van de service worker. */
 'use strict';
 
-const APP_VERSIE = '1.2.0';
+const APP_VERSIE = '1.3.0';
 const MAX_TONEN = 40;
 const THUMB_PX = 112;
 
@@ -367,23 +367,51 @@ async function importeerItems(items, bronNaam, progress) {
   bouwIndex();
 }
 
-async function syncVanUrl(stil) {
+let SYNC_BEZIG = null, LAATSTE_POGING = 0;
+function syncVanUrl(stil) {
+  if (SYNC_BEZIG) return SYNC_BEZIG;           // nooit twee tegelijk
+  LAATSTE_POGING = Date.now();
+  SYNC_BEZIG = _sync(stil).finally(() => { SYNC_BEZIG = null; document.getElementById('net').classList.remove('sync'); });
+  return SYNC_BEZIG;
+}
+/** Automatisch bijwerken (bij opstarten, terugkeren naar de app of wanneer er weer bereik is). */
+async function autoSync(minPauze) {
+  if (!navigator.onLine || SYNC_BEZIG) return;
+  if (Date.now() - LAATSTE_POGING < minPauze) return;
+  if (!(await DB.get('url'))) return;
+  syncVanUrl(true);
+}
+async function _sync(stil) {
   const url = (await DB.get('url')) || '';
   if (!url) { if (!stil) toast('Stel eerst de export-link in (⚙︎).'); return false; }
   if (!navigator.onLine) { if (!stil) toast('Geen internet — je werkt verder met de bewaarde bibliotheek.'); return false; }
   setProg(0.02, 'Bibliotheek ophalen…');
+  document.getElementById('net').classList.add('sync');
   try {
     const ctrl = new AbortController();
     const to = setTimeout(() => ctrl.abort(), 60000);
     const resp = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
     clearTimeout(to);
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const items = parseTekst(await resp.text());
+    const txt = await resp.text();
+    const h = hashStr(txt) + ':' + hashStr(txt.slice(1) + '#');
+    if (META && META.hash === h && LIB.length) {       // niets veranderd → niets te doen
+      META.bijgewerkt = new Date().toISOString(); await DB.set('meta', META);
+      setProg(null);
+      if (!stil) toast('✓ Alles was al up-to-date');
+      return true;
+    }
+    const items = parseTekst(txt);
     if (!items.length) throw new Error('Geen LP\'s ontvangen');
+    const voor = LIB.length;
     setProg(0.05, `${items.length} LP's ontvangen, hoezen verwerken…`);
     await importeerItems(items, 'Google Sheet', setProg);
+    META.hash = h; await DB.set('meta', META);
     setProg(null);
+    const verschil = items.length - voor;
     if (!stil) toast(`✓ ${items.length} LP's bijgewerkt`);
+    else if (voor && verschil > 0) toast(`✓ Bijgewerkt: ${verschil} nieuwe LP${verschil === 1 ? '' : "'s"}`);
+    else if (voor && verschil < 0) toast(`✓ Bijgewerkt (${items.length} LP's)`);
     render();
     return true;
   } catch (e) {
@@ -921,8 +949,9 @@ async function start() {
       });
     }).catch(() => {});
   }
-  // Automatisch bijwerken op de achtergrond als er internet is en de data > 12 u oud is
-  const oud = !META || (Date.now() - new Date(META.bijgewerkt)) > 12 * 36e5;
-  if (navigator.onLine && oud && (await DB.get('url'))) syncVanUrl(true);
+  // Automatisch bijwerken: bij opstarten, bij terugkeren naar de app en zodra er weer bereik is
+  autoSync(0);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') autoSync(2 * 60e3); });
+  window.addEventListener('online', () => setTimeout(() => autoSync(15e3), 1500));
 }
 start();
