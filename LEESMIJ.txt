@@ -14,6 +14,12 @@ STAP 1 — Sheet publiceren als CSV (Google, 2 min, eenmalig)
   dezelfde menu-optie → "Publicatie stoppen".
   (Alternatief: de Apps Script-export in LP-Export.gs, als die bij jou wél werkt.)
 
+STAP 1b — Scherpe covers (eenmalig, aanbevolen)
+  In de sheet staat enkel een kleine cover; de scherpe versie zit in Google Drive.
+  1. Open drive.google.com → map "LP Bibliotheek - Foto's"
+  2. Rechtsklik → Delen → Algemene toegang: "Iedereen met de link" → rol "Lezer" → Klaar
+  3. In de app: ⚙︎ → Nu bijwerken (met wifi). Onder ⚙︎ zie je "scherp (Drive): X".
+
 STAP 2 — App online zetten (gratis, eenmalig) via GitHub Pages
   1. Maak een gratis account op github.com
   2. "+" → New repository → naam: lp-zoeker → Public → Create

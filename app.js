@@ -3,7 +3,7 @@
  * de app zelf zit in de cache van de service worker. */
 'use strict';
 
-const APP_VERSIE = '1.4.0';
+const APP_VERSIE = '1.5.0';
 const MAX_TONEN = 40;
 const THUMB_PX = 112;
 const GROOT_PX = 720;
@@ -288,10 +288,15 @@ function vierkant(w, h, frac = 1) {
   return [(w - s) / 2, (h - s) / 2, s, s];
 }
 /** Maakt kleine thumbnail + vingerafdruk van een cover (data-URL of http-URL). */
-async function verwerkCover(src) {
-  if (!src) return { thumb: '', fp: null };
-  src = src.trim();
-  const pogingen = /^https?:/i.test(src) ? [src, proxyUrl(src)] : [src];
+/** Volledige-resolutie cover uit de Drive-map van de bibliotheek-app. */
+const driveUrl = id => 'https://lh3.googleusercontent.com/d/' + encodeURIComponent(id) + '=w' + GROOT_PX;
+const driveThumbUrl = id => 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(id) + '&sz=w' + GROOT_PX;
+async function verwerkCover(src, fileId) {
+  src = (src || '').trim();
+  if (!src && !fileId) return { thumb: '', fp: null };
+  const pogingen = [];
+  if (fileId) pogingen.push(driveUrl(fileId), proxyUrl(driveThumbUrl(fileId)));   // scherpe versie eerst
+  if (/^https?:/i.test(src)) pogingen.push(src, proxyUrl(src)); else if (src) pogingen.push(src);
   for (const p of pogingen) {
     try {
       const im = await laadImg(p);
@@ -313,7 +318,7 @@ async function verwerkCover(src) {
         gx.drawImage(im, rect[0], rect[1], rect[2], rect[3], 0, 0, G, G);
         groot = cg.toDataURL('image/jpeg', 0.8);
       }
-      return { thumb, groot, fp: vingerafdruk(im, rect) };
+      return { thumb, groot, fp: vingerafdruk(im, rect), drive: !!fileId && pogingen.indexOf(p) < 2 };
     } catch (e) { /* volgende poging */ }
   }
   // Niet lokaal op te slaan: toon enkel online
@@ -327,23 +332,23 @@ function rijNaarItem(r, kol) {
   return {
     id: o.id || '', artiest: o.artiest || '', album: o.album || '', jaar: o.jaar || '',
     label: o.label || '', genre: o.genre || '', notities: o.notities || '',
-    kringwinkel: o.kringwinkel || '', bron: o.bron || '', _cover: o.cover || ''
+    kringwinkel: o.kringwinkel || '', bron: o.bron || '', _cover: o.cover || '', _fid: (o.coverfileid || '').trim()
   };
 }
 
 async function importeerItems(items, bronNaam, progress) {
   // Bestaande vingerafdrukken hergebruiken als de cover niet veranderde
   const oud = new Map();
-  LIB.forEach((it, i) => { if (it.ch && it.gv) oud.set(it.ch, { fp: it.fp, key: it.tk, groot: it.heeftGroot }); });
+  LIB.forEach((it, i) => { if (it.ch && it.gv === 2) oud.set(it.ch, { fp: it.fp, key: it.tk, groot: it.heeftGroot, scherp: it.scherp }); });
   const oudeThumbKeys = oud.size ? new Set(await DB.allThumbKeys()) : new Set();
   const oudeThumbs = new Map();
   const nodig = [];
   items.forEach((it, i) => {
     it.tk = 't' + i;
-    it.ch = it._cover ? hashStr(it._cover) : '';
+    it.ch = (it._cover || it._fid) ? hashStr(it._fid + '|' + it._cover) : '';
     const o = it.ch && oud.get(it.ch);
-    if (o && o.fp && o.key && oudeThumbKeys.has(o.key)) { it.fp = o.fp; it._reuse = o.key; it._reuseG = o.groot; }
-    else if (it._cover) nodig.push(it);
+    if (o && o.fp && o.key && oudeThumbKeys.has(o.key)) { it.scherp = o.scherp; it.fp = o.fp; it._reuse = o.key; it._reuseG = o.groot; }
+    else if (it._cover || it._fid) nodig.push(it);
   });
   // Oude thumbs die we hergebruiken ophalen
   const reuse = items.filter(it => it._reuse);
@@ -354,12 +359,13 @@ async function importeerItems(items, bronNaam, progress) {
     part.forEach((it, j) => { oudeThumbs.set(it.tk, vals[j] || ''); if (gvals[j]) oudeThumbs.set(it.tk + 'g', gvals[j]); });
   }
   const nieuweThumbs = new Map();
+  const r_scherp = new Set(items.filter(it => it.scherp && it._reuse).map(it => it.tk));
   let klaar = 0;
   const PAR = 4;
   for (let k = 0; k < nodig.length; k += PAR) {
     await Promise.all(nodig.slice(k, k + PAR).map(async it => {
-      const r = await verwerkCover(it._cover);
-      it.fp = r.fp; nieuweThumbs.set(it.tk, r.thumb); if (r.groot) nieuweThumbs.set(it.tk + 'g', r.groot);
+      const r = await verwerkCover(it._cover, it._fid);
+      it.fp = r.fp; if (r.drive) r_scherp.add(it.tk); nieuweThumbs.set(it.tk, r.thumb); if (r.groot) nieuweThumbs.set(it.tk + 'g', r.groot);
     }));
     klaar += Math.min(PAR, nodig.length - k);
     progress && progress(klaar / nodig.length, `Hoezen verwerken ${klaar}/${nodig.length}`);
@@ -368,10 +374,10 @@ async function importeerItems(items, bronNaam, progress) {
   items.forEach(it => {
     const t = nieuweThumbs.has(it.tk) ? nieuweThumbs.get(it.tk) : oudeThumbs.get(it.tk);
     const g = nieuweThumbs.has(it.tk) ? nieuweThumbs.get(it.tk + 'g') : oudeThumbs.get(it.tk + 'g');
-    it.heeftThumb = !!t; it.heeftGroot = !!g; it.gv = 1;
+    it.heeftThumb = !!t; it.heeftGroot = !!g; it.gv = 2; it.scherp = !!(g && r_scherp.has(it.tk));
     if (t) entries.push([it.tk, t]);
     if (g) entries.push([it.tk + 'g', g]);
-    delete it._cover; delete it._reuse; delete it._reuseG;
+    delete it._cover; delete it._fid; delete it._reuse; delete it._reuseG;
   });
   await DB.putThumbs(entries, true);
   THUMBS.clear();
@@ -464,7 +470,7 @@ function parseTekst(txt) {
   const rows = parseCSV(txt);
   const kop = rows[0].map(h => h.trim().toLowerCase());
   const map = { id: 'id', artiest: 'artiest', album: 'album', jaar: 'jaar', label: 'label', genre: 'genre',
-    notities: 'notities', opmerkingenkringwinkel: 'kringwinkel', coverurl: 'cover', bronurl: 'bron' };
+    notities: 'notities', opmerkingenkringwinkel: 'kringwinkel', coverurl: 'cover', bronurl: 'bron', coverfileid: 'coverfileid' };
   const kol = kop.map(h => map[h] || ('_' + h));
   if (kol.indexOf('artiest') < 0 || kol.indexOf('album') < 0) throw new Error('Kolommen "Artiest" en "Album" niet gevonden (juiste tabblad gepubliceerd?)');
   return rows.slice(1).map(r => rijNaarItem(r, kol)).filter(it => it.artiest || it.album);
@@ -947,7 +953,7 @@ function toonStatus() {
   if (META) {
     const d = new Date(META.bijgewerkt);
     const dagen = Math.floor((Date.now() - d) / 864e5);
-    st.innerHTML = `<b>${META.aantal}</b> LP's op dit toestel<br>Bijgewerkt: <b>${d.toLocaleString('nl-BE')}</b>${dagen >= 7 ? ` <span style="color:var(--maybe)">(${dagen} dagen geleden)</span>` : ''}<br>Covers offline: <b>${LIB.filter(x => x.fp).length}</b> van ${LIB.filter(x => x.heeftThumb).length}${LIB.some(x => x.heeftThumb && !x.fp) ? ' <span style="color:var(--maybe)">(tik “Nu bijwerken” met goede wifi om de rest op te halen)</span>' : ''}<br>Bron: ${esc(META.bron)} · app v${APP_VERSIE}`;
+    st.innerHTML = `<b>${META.aantal}</b> LP's op dit toestel<br>Bijgewerkt: <b>${d.toLocaleString('nl-BE')}</b>${dagen >= 7 ? ` <span style="color:var(--maybe)">(${dagen} dagen geleden)</span>` : ''}<br>Covers offline: <b>${LIB.filter(x => x.fp).length}</b> van ${LIB.filter(x => x.heeftThumb).length} · scherp (Drive): <b>${LIB.filter(x => x.scherp).length}</b>${LIB.some(x => x.heeftThumb && !x.fp) ? ' <span style="color:var(--maybe)">(tik “Nu bijwerken” met goede wifi om de rest op te halen)</span>' : ''}<br>Bron: ${esc(META.bron)} · app v${APP_VERSIE}`;
   }
 }
 
