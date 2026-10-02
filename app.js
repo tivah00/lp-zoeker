@@ -3,9 +3,10 @@
  * de app zelf zit in de cache van de service worker. */
 'use strict';
 
-const APP_VERSIE = '1.3.0';
+const APP_VERSIE = '1.4.0';
 const MAX_TONEN = 40;
 const THUMB_PX = 112;
+const GROOT_PX = 720;
 
 /* ───────────────────────── IndexedDB ───────────────────────── */
 const DB = (() => {
@@ -281,7 +282,7 @@ function laadImg(src, ms = 15000) {
 }
 /** Gratis beeld-proxy die CORS toestaat en verkleint — enkel gebruikt tijdens bijwerken,
  *  voor covers waarvan de oorspronkelijke site het kopiëren blokkeert. */
-const proxyUrl = u => 'https://wsrv.nl/?url=' + encodeURIComponent(u.replace(/^https?:\/\//, '')) + '&w=300&h=300&fit=cover&output=jpg&q=80';
+const proxyUrl = u => 'https://wsrv.nl/?url=' + encodeURIComponent(u.replace(/^https?:\/\//, '')) + '&w=720&h=720&fit=cover&output=jpg&q=80';
 function vierkant(w, h, frac = 1) {
   const s = Math.min(w, h) * frac;
   return [(w - s) / 2, (h - s) / 2, s, s];
@@ -301,11 +302,22 @@ async function verwerkCover(src) {
       cx.imageSmoothingQuality = 'high';
       cx.drawImage(im, rect[0], rect[1], rect[2], rect[3], 0, 0, THUMB_PX, THUMB_PX);
       const thumb = cv.toDataURL('image/jpeg', 0.72); // gooit fout als de site kopiëren blokkeert
-      return { thumb, fp: vingerafdruk(im, rect) };
+      // Grote versie om in te zoomen (max. GROOT_PX, nooit groter dan het origineel)
+      const G = Math.round(Math.min(GROOT_PX, rect[2]));
+      let groot = '';
+      if (G > THUMB_PX * 1.3) {
+        const cg = document.createElement('canvas');
+        cg.width = cg.height = G;
+        const gx = cg.getContext('2d');
+        gx.imageSmoothingQuality = 'high';
+        gx.drawImage(im, rect[0], rect[1], rect[2], rect[3], 0, 0, G, G);
+        groot = cg.toDataURL('image/jpeg', 0.8);
+      }
+      return { thumb, groot, fp: vingerafdruk(im, rect) };
     } catch (e) { /* volgende poging */ }
   }
   // Niet lokaal op te slaan: toon enkel online
-  return { thumb: /^https?:/i.test(src) ? src : '', fp: null };
+  return { thumb: /^https?:/i.test(src) ? src : '', groot: '', fp: null };
 }
 function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i += 7) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36) + ':' + s.length; }
 
@@ -322,7 +334,7 @@ function rijNaarItem(r, kol) {
 async function importeerItems(items, bronNaam, progress) {
   // Bestaande vingerafdrukken hergebruiken als de cover niet veranderde
   const oud = new Map();
-  LIB.forEach((it, i) => { if (it.ch) oud.set(it.ch, { fp: it.fp, key: it.tk }); });
+  LIB.forEach((it, i) => { if (it.ch && it.gv) oud.set(it.ch, { fp: it.fp, key: it.tk, groot: it.heeftGroot }); });
   const oudeThumbKeys = oud.size ? new Set(await DB.allThumbKeys()) : new Set();
   const oudeThumbs = new Map();
   const nodig = [];
@@ -330,7 +342,7 @@ async function importeerItems(items, bronNaam, progress) {
     it.tk = 't' + i;
     it.ch = it._cover ? hashStr(it._cover) : '';
     const o = it.ch && oud.get(it.ch);
-    if (o && o.fp && o.key && oudeThumbKeys.has(o.key)) { it.fp = o.fp; it._reuse = o.key; }
+    if (o && o.fp && o.key && oudeThumbKeys.has(o.key)) { it.fp = o.fp; it._reuse = o.key; it._reuseG = o.groot; }
     else if (it._cover) nodig.push(it);
   });
   // Oude thumbs die we hergebruiken ophalen
@@ -338,7 +350,8 @@ async function importeerItems(items, bronNaam, progress) {
   for (let k = 0; k < reuse.length; k += 200) {
     const part = reuse.slice(k, k + 200);
     const vals = await DB.thumbs(part.map(it => it._reuse));
-    part.forEach((it, j) => oudeThumbs.set(it.tk, vals[j] || ''));
+    const gvals = await DB.thumbs(part.map(it => it._reuseG ? it._reuse + 'g' : '_geen_'));
+    part.forEach((it, j) => { oudeThumbs.set(it.tk, vals[j] || ''); if (gvals[j]) oudeThumbs.set(it.tk + 'g', gvals[j]); });
   }
   const nieuweThumbs = new Map();
   let klaar = 0;
@@ -346,7 +359,7 @@ async function importeerItems(items, bronNaam, progress) {
   for (let k = 0; k < nodig.length; k += PAR) {
     await Promise.all(nodig.slice(k, k + PAR).map(async it => {
       const r = await verwerkCover(it._cover);
-      it.fp = r.fp; nieuweThumbs.set(it.tk, r.thumb);
+      it.fp = r.fp; nieuweThumbs.set(it.tk, r.thumb); if (r.groot) nieuweThumbs.set(it.tk + 'g', r.groot);
     }));
     klaar += Math.min(PAR, nodig.length - k);
     progress && progress(klaar / nodig.length, `Hoezen verwerken ${klaar}/${nodig.length}`);
@@ -354,9 +367,11 @@ async function importeerItems(items, bronNaam, progress) {
   const entries = [];
   items.forEach(it => {
     const t = nieuweThumbs.has(it.tk) ? nieuweThumbs.get(it.tk) : oudeThumbs.get(it.tk);
-    it.heeftThumb = !!t;
+    const g = nieuweThumbs.has(it.tk) ? nieuweThumbs.get(it.tk + 'g') : oudeThumbs.get(it.tk + 'g');
+    it.heeftThumb = !!t; it.heeftGroot = !!g; it.gv = 1;
     if (t) entries.push([it.tk, t]);
-    delete it._cover; delete it._reuse;
+    if (g) entries.push([it.tk + 'g', g]);
+    delete it._cover; delete it._reuse; delete it._reuseG;
   });
   await DB.putThumbs(entries, true);
   THUMBS.clear();
@@ -738,7 +753,7 @@ function markeer(orig, qt) {
 function kaart(it, qt, extra) {
   const meta = [it.jaar, it.label, it.genre].filter(Boolean).map(esc).join(' · ');
   return `<div class="card">
-    <img data-tk="${esc(it.heeftThumb ? it.tk : '')}" alt="" style="${it.heeftThumb ? '' : 'display:none'}">
+    <img data-tk="${esc(it.heeftThumb ? it.tk : '')}" data-groot="${it.heeftGroot ? 1 : ''}" data-titel="${esc((it.artiest || '') + ' — ' + (it.album || ''))}" alt="" class="zoombaar" style="${it.heeftThumb ? '' : 'display:none'}">
     ${it.heeftThumb ? '' : '<div class="ph">💿</div>'}
     <div class="body">
       <div class="art">${markeer(it.artiest || '(onbekende artiest)', qt)}${it._dup > 1 ? `<span class="pill dup">${it._dup}×</span>` : ''}${extra || ''}</div>
@@ -840,7 +855,7 @@ function renderFoto(out) {
   else if (top && top.s >= 0.35 && top.art && !top.alb && top.h < 0.3) html += `<div class="verdict v-maybe"><span class="big">?</span><div>Artiest zit in de collectie<small>Maar dit album misschien niet — vergelijk de titels hieronder</small></div></div>`;
   else if (top && top.s >= 0.35) html += `<div class="verdict v-maybe"><span class="big">?</span><div>Mogelijk in de collectie<small>Niet zeker — vergelijk de suggesties of typ de naam</small></div></div>`;
   else html += `<div class="verdict v-no"><span class="big">✗</span><div>Niets herkend<small>Waarschijnlijk niet in de collectie — typ de naam om zeker te zijn</small></div></div>`;
-  html += `<img class="shot" src="${shot}" alt="">`;
+  html += `<img class="shot" src="${shot}" data-titel="Jouw foto" alt="">`;
   if (ocr.herkend.length) {
     html += `<div class="sect">Herkende woorden — tik om te zoeken</div><div class="chips">` +
       ocr.herkend.slice(0, 14).map(w => `<button class="chip hit" data-w="${esc(w)}">${esc(w)}</button>`).join('') + `</div>`;
@@ -865,6 +880,51 @@ function renderFoto(out) {
   });
   document.getElementById('fotoWeg').onclick = () => { FOTO = null; render(); document.getElementById('q').focus(); };
   vulThumbs();
+}
+
+/* ───────────────────────── Vergroten ───────────────────────── */
+async function toonGroot(img) {
+  const z = document.getElementById('zoom'), zi = document.getElementById('zoomImg');
+  zi.src = img.src;                                  // meteen iets tonen
+  document.getElementById('zoomTxt').textContent = img.dataset.titel || '';
+  resetZoom(); z.classList.add('open');
+  if (img.dataset.tk && img.dataset.groot) {
+    try { const [g] = await DB.thumbs([img.dataset.tk + 'g']); if (g && z.classList.contains('open')) zi.src = g; } catch (e) {}
+  }
+}
+let ZS = { s: 1, x: 0, y: 0 };
+function resetZoom() { ZS = { s: 1, x: 0, y: 0 }; zetZoom(); }
+function zetZoom() { document.getElementById('zoomImg').style.transform = `translate(${ZS.x}px,${ZS.y}px) scale(${ZS.s})`; }
+function initZoom() {
+  const z = document.getElementById('zoom'), zi = document.getElementById('zoomImg');
+  let start = null, laatsteTik = 0, beweegd = false;
+  const afst = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  z.addEventListener('touchstart', e => {
+    beweegd = false;
+    const t = e.touches;
+    start = t.length === 2 ? { d: afst(t), s: ZS.s, x: ZS.x, y: ZS.y }
+      : { px: t[0].clientX, py: t[0].clientY, x: ZS.x, y: ZS.y, s: ZS.s };
+  }, { passive: true });
+  z.addEventListener('touchmove', e => {
+    if (!start) return; e.preventDefault(); beweegd = true;
+    const t = e.touches;
+    if (t.length === 2 && start.d) ZS.s = Math.max(1, Math.min(5, start.s * afst(t) / start.d));
+    else if (t.length === 1 && ZS.s > 1 && start.px != null) { ZS.x = start.x + t[0].clientX - start.px; ZS.y = start.y + t[0].clientY - start.py; }
+    zetZoom();
+  }, { passive: false });
+  z.addEventListener('touchend', e => { if (e.touches.length === 0) { if (ZS.s <= 1.02) resetZoom(); start = null; } });
+  z.addEventListener('click', e => {
+    if (beweegd) return;
+    if (e.target.id === 'zoomClose') { z.classList.remove('open'); return; }
+    const nu = Date.now();
+    if (nu - laatsteTik < 320) { ZS.s > 1 ? resetZoom() : (ZS = { s: 2.5, x: 0, y: 0 }, zetZoom()); laatsteTik = 0; return; }
+    laatsteTik = nu;
+    setTimeout(() => { if (laatsteTik === nu && ZS.s <= 1 && e.target !== zi) z.classList.remove('open'); }, 330);
+  });
+  document.getElementById('out').addEventListener('click', e => {
+    const im = e.target.closest('img.zoombaar, img.shot');
+    if (im && im.src) toonGroot(im);
+  });
 }
 
 /* ───────────────────────── UI-hulp ───────────────────────── */
@@ -898,6 +958,7 @@ async function start() {
   q.addEventListener('input', () => { toonAlles = false; FOTO = null; cancelAnimationFrame(raf); raf = requestAnimationFrame(render); });
   q.addEventListener('keydown', e => { if (e.key === 'Enter') q.blur(); });
   document.getElementById('clear').onclick = () => { q.value = ''; FOTO = null; render(); q.focus(); };
+  initZoom();
   document.getElementById('btnCam').onclick = openCamera;
   document.getElementById('btnKw').onclick = () => { KW_MODUS = !KW_MODUS; FOTO = null; q.value = ''; toonAlles = false; render(); window.scrollTo(0, 0); };
   document.getElementById('camClose').onclick = stopCamera;

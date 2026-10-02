@@ -109,6 +109,12 @@ main{padding:12px 16px}
 .spin{width:44px;height:44px;border:4px solid rgba(255,255,255,.2);border-top-color:var(--acc);border-radius:50%;animation:s 0.9s linear infinite;margin:0 auto 14px}
 @keyframes s{to{transform:rotate(360deg)}}
 .shot{width:120px;height:120px;border-radius:10px;object-fit:cover;float:right;margin:0 0 8px 12px;border:1px solid var(--line)}
+.card img.zoombaar,.shot{cursor:zoom-in}
+.zoom{position:fixed;inset:0;z-index:45;background:rgba(0,0,0,.97);display:none;align-items:center;justify-content:center;overflow:hidden;touch-action:none}
+.zoom.open{display:flex}
+.zoom img{width:min(96vw,96vh);height:min(96vw,96vh);object-fit:contain;border-radius:6px;transform-origin:center;will-change:transform;user-select:none;-webkit-user-select:none}
+.zoomTxt{position:absolute;left:16px;right:70px;top:calc(18px + var(--safe-t));color:#fff;font-weight:600;font-size:15px;text-shadow:0 1px 3px #000}
+.zoomClose{position:absolute;right:14px;top:calc(10px + var(--safe-t));width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.18);color:#fff;font-size:20px}
 .toast{position:fixed;left:16px;right:16px;bottom:calc(20px + var(--safe-b));z-index:50;background:#000;color:#fff;
   border:1px solid var(--line);padding:12px 14px;border-radius:12px;font-size:14.5px;display:none}
 .toast.open{display:block}
@@ -171,6 +177,11 @@ main{padding:12px 16px}
 <input type="file" id="fileCam" accept="image/*" style="display:none">
 
 <div class="busy" id="busy"><div><div class="spin"></div><div id="busyTxt">Bezig…</div></div></div>
+<div class="zoom" id="zoom">
+  <img id="zoomImg" alt="">
+  <div class="zoomTxt" id="zoomTxt"></div>
+  <button class="zoomClose" id="zoomClose" aria-label="Sluiten">✕</button>
+</div>
 <div class="toast" id="toast"></div>
 
 <script src="app.js"></script>
