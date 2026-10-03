@@ -37,6 +37,10 @@ STAP 3 — Op de iPhone installeren (met internet)
   5. Test: zet vliegtuigmodus aan, sluit de app volledig en open opnieuw → zoeken moet werken
 
 GEBRUIK
+  - 💶 Prijs (internet nodig): foto van hoes of achterkant (catalogusnr. = exacte persing)
+    → Discogs-resultaten, gesorteerd op gelijkenis met je foto → tik de juiste persing.
+    Eenmalig: ⚙︎ → Discogs-token plakken (discogs.com → Settings → Developers → Generate new token).
+    Zonder internet wordt de foto bewaard in ⏳ Prijzen en kan je hem later opzoeken.
   - Typen: zoekt meteen in artiest, album, label, jaar. Tikfouten worden opgevangen.
     Groen = hebben we al · Geel = lijkt erop · Rood = niet in de collectie
   - 📷: hoes in het kader houden → foto → de app leest de tekst én vergelijkt de hoes met jullie covers

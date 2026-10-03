@@ -3,7 +3,7 @@
  * de app zelf zit in de cache van de service worker. */
 'use strict';
 
-const APP_VERSIE = '1.6.0';
+const APP_VERSIE = '1.7.0';
 const MAX_TONEN = 40;
 const THUMB_PX = 112;
 const GROOT_PX = 720;
@@ -632,6 +632,13 @@ function hoesMatch(fp) {
   return d.slice(0, 12);
 }
 
+/** OCR in twee doorgangen: donkere tekst op lichte achtergrond, en omgekeerd. */
+async function leesTekst(cv) {
+  const w = await ocrWorker();
+  const t1 = (await w.recognize(binariseer(cv, 900, false))).data.text || '';
+  const t2 = (await w.recognize(binariseer(cv, 900, true))).data.text || '';
+  return t1 + '\n' + t2;
+}
 async function verwerkFoto(src, rect) {
   toonBusy('Hoes vergelijken…');
   try {
@@ -647,11 +654,7 @@ async function verwerkFoto(src, rect) {
     let ocr = { res: [], herkend: [] }, ocrFout = '';
     try {
       toonBusy('Tekst lezen…');
-      const w = await ocrWorker();
-      // Twee doorgangen: donkere tekst op lichte achtergrond, en omgekeerd
-      const t1 = (await w.recognize(binariseer(cv, 900, false))).data.text || '';
-      const t2 = (await w.recognize(binariseer(cv, 900, true))).data.text || '';
-      const tekst = t1 + '\n' + t2;
+      const tekst = await leesTekst(cv);
       ocr = ocrMatch(tekst);
       ocr.ruw = tekst.replace(/\s+/g, ' ').trim();
     } catch (e) { ocrFout = 'Tekstherkenning niet beschikbaar (eerst één keer met internet openen).'; }
@@ -678,8 +681,14 @@ let stream = null;
 /* Zoom: hardware-zoom van de iPhone als die beschikbaar is (o.a. 0,5× groothoek),
  * anders digitale zoom (enkel inzoomen). */
 let CAMZ = { hw: null, min: 1, max: 4, z: 1 };
-async function openCamera() {
-  if (!LIB.length) { toast('Nog geen bibliotheek geladen (⚙︎).'); return; }
+let CAM_MODUS = 'collectie';
+async function openCamera(modus) {
+  CAM_MODUS = modus === 'prijs' ? 'prijs' : 'collectie';
+  document.querySelector('.camtxt').textContent = CAM_MODUS === 'prijs'
+    ? '💶 Prijs: hoes (of achterkant met catalogusnr.) in het kader'
+    : 'Hoes binnen het kader · knijp om te zoomen';
+  if (CAM_MODUS === 'collectie' && !LIB.length) { toast('Nog geen bibliotheek geladen (⚙︎).'); return; }
+  if (CAM_MODUS === 'prijs' && !(await DB.get('discogsToken'))) { toast('Stel eerst je Discogs-token in (⚙︎).'); openSettings(); return; }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { document.getElementById('fileCam').click(); return; }
   const cv = document.getElementById('camview');
   const video = document.getElementById('video');
@@ -769,7 +778,7 @@ function neemFoto() {
   snap.width = vw; snap.height = vh;
   snap.getContext('2d').drawImage(video, 0, 0, vw, vh);
   stopCamera();
-  verwerkFoto(snap, [sx, sy, s, s]);
+  (CAM_MODUS === 'prijs' ? verwerkPrijsFoto : verwerkFoto)(snap, [sx, sy, s, s]);
 }
 function initCamGebaren() {
   const cvw = document.getElementById('camview');
@@ -790,7 +799,7 @@ async function fotoUitBestand(file) {
   try {
     const url = URL.createObjectURL(file);
     const im = await laadImg(url);
-    await verwerkFoto(im, vierkant(im.naturalWidth, im.naturalHeight, 0.92));
+    await (CAM_MODUS === 'prijs' ? verwerkPrijsFoto : verwerkFoto)(im, vierkant(im.naturalWidth, im.naturalHeight, 0.92));
     URL.revokeObjectURL(url);
   } catch (e) { toast('Foto kon niet gelezen worden.'); }
 }
@@ -798,6 +807,7 @@ async function fotoUitBestand(file) {
 /* ───────────────────────── Weergave ───────────────────────── */
 let FOTO = null;
 let KW_MODUS = false;
+let PRIJS = null;
 let toonAlles = false;
 const THUMBS = new Map();
 const esc = s => String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -855,6 +865,7 @@ function render() {
   const out = document.getElementById('out');
   const q = document.getElementById('q').value;
   document.getElementById('clear').style.display = q ? 'block' : 'none';
+  if (PRIJS && !q.trim()) return renderPrijs(out);
   if (!LIB.length) {
     out.innerHTML = `<div class="empty"><div class="big">💿</div>Nog geen bibliotheek op dit toestel.<br><br>
       Tik op <b>⚙︎</b> om de export-link in te stellen en de bibliotheek op te halen (één keer met internet).</div>`;
@@ -862,6 +873,8 @@ function render() {
   }
   zetKwKnop();
   if (KW_MODUS) return renderKw(out, q);
+  if (PRIJS && !q.trim()) return renderPrijs(out);
+  PRIJS = null;
   if (FOTO && !q.trim()) return renderFoto(out);
   FOTO = null;
   const qt = toks(q);
@@ -958,13 +971,292 @@ function renderFoto(out) {
   vulThumbs();
 }
 
+/* ───────────────────────── Discogs-prijzen ───────────────────────── */
+const DG = 'https://api.discogs.com';
+const STATEN = [['Mint (M)', 'M'], ['Near Mint (NM or M-)', 'NM'], ['Very Good Plus (VG+)', 'VG+'], ['Very Good (VG)', 'VG'],
+  ['Good Plus (G+)', 'G+'], ['Good (G)', 'G'], ['Fair (F)', 'F'], ['Poor (P)', 'P']];
+const PRIJS_CACHE = new Map();
+
+async function dgFetch(pad, params) {
+  const token = await DB.get('discogsToken');
+  if (!token) throw new Error('Geen Discogs-token ingesteld (⚙︎)');
+  const u = new URL(DG + pad);
+  Object.entries(params || {}).forEach(([k, v]) => { if (v !== '' && v != null) u.searchParams.set(k, v); });
+  const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const r = await fetch(u, { headers: { Authorization: 'Discogs token=' + token }, signal: ctrl.signal });
+    if (r.status === 401) throw new Error('Discogs-token ongeldig (⚙︎)');
+    if (r.status === 429) throw new Error('Even te veel opzoekingen — wacht een minuutje');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error(j.message || ('Discogs HTTP ' + r.status)); e.status = r.status; throw e; }
+    return j;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Discogs antwoordt niet (time-out)');
+    if (e instanceof TypeError) throw new Error('Geen verbinding met Discogs');
+    throw e;
+  } finally { clearTimeout(to); }
+}
+async function munt() { return (await DB.get('discogsMunt')) || 'EUR'; }
+
+/** Haalt uit de gelezen tekst: barcode, catalogusnummers en bruikbare woorden. */
+function zoekTermen(tekst) {
+  const t = String(tekst || '');
+  const barcode = (t.replace(/[ \-]/g, '').match(/\b\d{12,13}\b/) || [])[0] || '';
+  // Catalogusnummers zoals "SHVL 804", "2C 068-04231", "CBS 62345", "PL 12345"
+  const catnos = [...new Set((t.match(/\b[A-Z]{1,6}[ .\-]?\d[\d .\-]{2,10}\d\b/g) || [])
+    .map(c => c.trim().replace(/\s+/g, ' ')).filter(c => c.replace(/\D/g, '').length >= 3 && c.replace(/\D/g, '').length <= 10))].slice(0, 3);
+  const woorden = [];
+  const gezien = new Set();
+  String(t).split(/[\s|]+/).forEach(w => {
+    const n = norm(w);
+    if (!n || n.includes(' ')) { n.split(' ').forEach(x => voegToe(x)); return; }
+    voegToe(n);
+  });
+  function voegToe(n) {
+    if (!n || gezien.has(n)) return;
+    if (n.length < 3 && !/^(ac|dc|ub|xx)$/.test(n)) return;
+    if (/\d/.test(n)) return;
+    if (!/[aeiouy]/.test(n) && n.length > 4) return;               // klinkerloze rommel
+    if (/(.)\1\1/.test(n)) return;                                   // "lll", "eee"
+    if (STOP.has(n) && !['the'].includes(n)) return;
+    gezien.add(n); woorden.push(n);
+  }
+  return { barcode, catnos, woorden: woorden.slice(0, 10) };
+}
+
+async function dgZoek(query) {
+  const basis = { type: 'release', format: 'Vinyl', per_page: 25 };
+  if (query.barcode) {
+    const r = await dgFetch('/database/search', { ...basis, barcode: query.barcode });
+    if (r.results && r.results.length) return { res: r.results, via: 'barcode ' + query.barcode };
+  }
+  for (const c of query.catnos || []) {
+    const r = await dgFetch('/database/search', { ...basis, catno: c });
+    if (r.results && r.results.length && r.results.length < 25) return { res: r.results, via: 'catalogusnr. ' + c };
+  }
+  const w = query.woorden || [];
+  const pogingen = [w.slice(0, 7), w.slice(0, 5), [...w].sort((a, b) => b.length - a.length).slice(0, 3), w.slice(0, 2)]
+    .map(x => x.join(' ')).filter((x, i, a) => x && a.indexOf(x) === i);
+  for (const q of pogingen) {
+    const r = await dgFetch('/database/search', { ...basis, q });
+    if (r.results && r.results.length) return { res: r.results, via: '“' + q + '”' };
+  }
+  return { res: [], via: '' };
+}
+
+/** Sorteert resultaten mee op gelijkenis met de foto (helpt de juiste persing te vinden). */
+async function rangschikOpHoes(res, fp) {
+  if (!fp) return res;
+  await Promise.all(res.slice(0, 20).map(async (r, k) => {
+    r._rang = k;
+    const src = r.cover_image || r.thumb;
+    if (!src || /spacer/.test(src)) return;
+    try {
+      const im = await laadImg(proxyUrl(src), 8000);
+      r._d = fpAfstand(fp, vingerafdruk(im, vierkant(im.naturalWidth, im.naturalHeight)));
+    } catch (e) {}
+  }));
+  return res.map((r, k) => ({ r, s: (r._d != null ? r._d * 2.2 : 1.1) + Math.min(k, 20) * 0.025 }))
+    .sort((a, b) => a.s - b.s).map(x => x.r);
+}
+
+async function haalPrijzen(id) {
+  if (PRIJS_CACHE.has(id)) return PRIJS_CACHE.get(id);
+  const curr = await munt();
+  const [rel, stats, sugg] = await Promise.all([
+    dgFetch('/releases/' + id, { curr_abbr: curr }).catch(e => ({ _fout: e.message })),
+    dgFetch('/marketplace/stats/' + id, { curr_abbr: curr }).catch(e => ({ _fout: e.message })),
+    dgFetch('/marketplace/price_suggestions/' + id).catch(e => ({ _fout: e.message, _status: e.status }))
+  ]);
+  const d = { id, rel, stats, sugg, curr, t: Date.now() };
+  PRIJS_CACHE.set(id, d);
+  return d;
+}
+
+function bedrag(v, c) {
+  if (v == null || isNaN(v)) return '—';
+  try { return new Intl.NumberFormat('nl-BE', { style: 'currency', currency: c || 'EUR' }).format(v); }
+  catch (e) { return (+v).toFixed(2) + ' ' + (c || ''); }
+}
+
+/** Kijkt of een Discogs-resultaat al in de eigen collectie zit. */
+function inCollectie(titel) {
+  const [art, ...rest] = String(titel || '').split(' - ');
+  const a = norm(art.replace(/\(\d+\)/g, '')), b = norm(rest.join(' - '));
+  if (!a || !b) return null;
+  return LIB.find(it => (it._na === a || it._na.includes(a) || a.includes(it._na)) && it._na && it._nb &&
+    (it._nb === b || it._nb.includes(b) || b.includes(it._nb))) || null;
+}
+
+async function verwerkPrijsFoto(src, rect) {
+  const cv = document.createElement('canvas');
+  const S = 1100; cv.width = cv.height = S;
+  cv.getContext('2d').drawImage(src, rect[0], rect[1], rect[2], rect[3], 0, 0, S, S);
+  const shot = cv.toDataURL('image/jpeg', 0.6);
+  const fp = vingerafdruk(cv, [0, 0, S, S]);
+  toonBusy('Tekst lezen…');
+  let tekst = '';
+  try { tekst = await leesTekst(cv); } catch (e) {}
+  verbergBus();
+  const termen = zoekTermen(tekst);
+  document.getElementById('q').value = '';
+  FOTO = null; KW_MODUS = false;
+  PRIJS = { shot, fp, termen, query: termen.woorden.slice(0, 6).join(' '), status: 'zoeken', res: [], open: null };
+  if (!navigator.onLine) {
+    await bewaarInWachtrij(PRIJS);
+    PRIJS.status = 'offline';
+    render(); return;
+  }
+  render();
+  await prijsZoek(termen);
+}
+function verbergBus() { verbergBusy(); }
+
+async function prijsZoek(termen) {
+  const P = PRIJS; if (!P) return;
+  P.status = 'zoeken'; P.fout = ''; render();
+  try {
+    const { res, via } = await dgZoek(termen);
+    if (PRIJS !== P) return;
+    P.via = via;
+    P.res = await rangschikOpHoes(res, P.fp);
+    P.status = 'klaar';
+    if (P.res[0]) { P.open = P.res[0].id; render(); await toonPrijs(P.res[0].id); }
+    else render();
+  } catch (e) {
+    if (PRIJS !== P) return;
+    P.status = 'fout'; P.fout = e.message; render();
+  }
+}
+async function toonPrijs(id) {
+  const P = PRIJS; if (!P) return;
+  P.open = id; render();
+  try { await haalPrijzen(id); } catch (e) { P.fout = e.message; }
+  if (PRIJS === P) render();
+}
+
+function prijsBlok(d) {
+  if (!d) return `<div class="pbox"><div class="spin sm"></div> Prijzen ophalen…</div>`;
+  const c = d.curr;
+  const st = d.stats || {}, rel = d.rel || {};
+  const laagsteNu = st.lowest_price ? bedrag(st.lowest_price.value, st.lowest_price.currency || c) : (rel.lowest_price != null ? bedrag(rel.lowest_price, c) : '—');
+  const aantal = st.num_for_sale != null ? st.num_for_sale : rel.num_for_sale;
+  let html = `<div class="pbox">`;
+  const sg = d.sugg && !d.sugg._fout ? d.sugg : null;
+  const waarden = sg ? STATEN.map(([k, kort]) => sg[k] ? { kort, v: sg[k].value, c: sg[k].currency } : null).filter(Boolean) : [];
+  const nuV = st.lowest_price ? st.lowest_price.value : rel.lowest_price;
+  const advies = k => { const x = waarden.find(w => w.kort === k); return x ? bedrag(x.v, x.c || c) : '—'; };
+  html += `<div class="ptrio">
+      <div><small>Laagste</small><b>${nuV != null ? bedrag(nuV, (st.lowest_price || {}).currency || c) : '—'}</b><i>nu te koop</i></div>
+      <div class="mid"><small>Midden</small><b>${advies('VG+')}</b><i>advies VG+</i></div>
+      <div><small>Hoog</small><b>${advies('NM')}</b><i>advies NM</i></div></div>`;
+  if (waarden.length) {
+    html += `<div class="psub">Discogs-prijsadvies per staat (gebaseerd op verkopen):</div>
+      <div class="pgrid">${waarden.map(x => `<span>${x.kort}</span><b>${bedrag(x.v, x.c || c)}</b>`).join('')}</div>`;
+  } else {
+    const r = d.sugg && d.sugg._fout || '';
+    html += `<div class="psub">Geen prijsadvies beschikbaar${/seller|setting|instellingen/i.test(r) ? ' — vul eerst je verkopersinstellingen in op Discogs' : r ? ' (' + esc(r) + ')' : ' (te weinig verkopen)'}.</div>`;
+  }
+  html += `<div class="pnow">🛒 <b>${aantal != null ? aantal : '—'}</b> exemplaren te koop vanaf <b>${laagsteNu}</b>`;
+  if (rel.community) html += ` · ❤︎ ${rel.community.want} willen / ${rel.community.have} hebben`;
+  html += `</div>
+    <a class="plink" href="https://www.discogs.com/release/${d.id}" target="_blank" rel="noopener">Verkoopgeschiedenis (laag / mediaan / hoog) op Discogs ↗</a>
+  </div>`;
+  return html;
+}
+
+function renderPrijs(out) {
+  const P = PRIJS;
+  let html = '';
+  if (P.shot) html += `<img class="shot" src="${P.shot}" data-titel="Jouw foto" alt="">`;
+  html += `<div class="sect">💶 Prijs opzoeken op Discogs</div>
+    <form class="pq" id="pqForm"><input id="pq" type="search" value="${esc(P.query)}" placeholder="artiest, titel of catalogusnr." autocomplete="off" autocorrect="off" spellcheck="false"><button>Zoek</button></form>`;
+  if (P.via) html += `<div class="meta" style="color:var(--dim);font-size:12.5px;margin-top:6px">Gevonden via ${esc(P.via)}</div>`;
+  html += `<div style="clear:both"></div>`;
+  if (P.status === 'offline') {
+    html += `<div class="verdict v-maybe"><span class="big">📶</span><div>Geen internet<small>Foto bewaard in de prijs-wachtrij. Zodra je bereik hebt kan je hem opzoeken via ⏳ hieronder.</small></div></div>`;
+  } else if (P.status === 'zoeken') {
+    html += `<div class="pbox"><div class="spin sm"></div> Zoeken op Discogs…</div>`;
+  } else if (P.status === 'fout') {
+    html += `<div class="verdict v-no"><span class="big">!</span><div>Opzoeken mislukt<small>${esc(P.fout)}</small></div></div>`;
+  } else if (!P.res.length) {
+    html += `<div class="verdict v-no"><span class="big">✗</span><div>Niets gevonden op Discogs<small>Pas de zoektekst hierboven aan (bv. artiest + titel), of fotografeer de achterkant met het catalogusnummer.</small></div></div>`;
+  } else {
+    html += `<div class="sect">Kies de juiste persing (${P.res.length})</div>`;
+    html += P.res.slice(0, 15).map(r => {
+      const open = P.open === r.id;
+      const eigen = inCollectie(r.title);
+      const meta = [r.year, r.country, (r.label || [])[0], r.catno].filter(Boolean).map(esc).join(' · ');
+      const fmt = (r.format || []).filter(f => !/^vinyl$/i.test(f)).slice(0, 4).map(esc).join(', ');
+      return `<div class="card pres${open ? ' open' : ''}" data-id="${r.id}">
+        <img src="${esc(r.thumb || '')}" alt="" class="zoombaar" data-titel="${esc(r.title)}" ${r.cover_image ? `data-src-groot="${esc(r.cover_image)}"` : ''}>
+        <div class="body"><div class="art">${esc(r.title)}${eigen ? '<span class="pill dup">✓ in collectie</span>' : ''}</div>
+          <div class="meta">${meta}</div>${fmt ? `<div class="meta">${fmt}</div>` : ''}
+          ${open ? prijsBlok(PRIJS_CACHE.get(r.id)) : `<div class="meta" style="color:var(--acc)">Tik voor prijzen</div>`}
+        </div></div>`;
+    }).join('');
+  }
+  html += `<button class="more" id="prijsNieuw">📷 Nieuwe prijsfoto</button>`;
+  out.innerHTML = html;
+  document.getElementById('pqForm').onsubmit = e => {
+    e.preventDefault();
+    const v = document.getElementById('pq').value.trim(); if (!v) return;
+    document.getElementById('pq').blur();
+    P.query = v; P.via = '';
+    const t = zoekTermen(v); t.woorden = toks(v).filter(w => w.length > 1); 
+    if (/\d{3,}/.test(v) && t.woorden.length <= 1) t.catnos = [v];
+    prijsZoek(t);
+  };
+  out.querySelectorAll('.card.pres').forEach(c => c.addEventListener('click', e => {
+    if (e.target.closest('a,img')) return;
+    const id = +c.dataset.id; if (P.open !== id || !PRIJS_CACHE.has(id)) toonPrijs(id);
+  }));
+  document.getElementById('prijsNieuw').onclick = () => openCamera('prijs');
+}
+
+/* Prijs-wachtrij (foto's genomen zonder internet) */
+async function bewaarInWachtrij(P) {
+  const q = (await DB.get('prijsWachtrij')) || [];
+  q.unshift({ t: Date.now(), shot: P.shot, fp: P.fp, termen: P.termen, query: P.query });
+  await DB.set('prijsWachtrij', q.slice(0, 30));
+  zetWachtKnop();
+}
+async function zetWachtKnop() {
+  const q = (await DB.get('prijsWachtrij')) || [];
+  const b = document.getElementById('btnWacht');
+  b.style.display = q.length ? '' : 'none';
+  b.innerHTML = `⏳ Prijzen <span>${q.length}</span>`;
+}
+async function toonWachtrij() {
+  const q = (await DB.get('prijsWachtrij')) || [];
+  const out = document.getElementById('out');
+  KW_MODUS = false; FOTO = null; PRIJS = null; document.getElementById('q').value = ''; zetKwKnop();
+  out.innerHTML = `<div class="verdict v-maybe"><span class="big">⏳</span><div>Prijs-wachtrij (${q.length})<small>Foto's genomen zonder internet. Tik er één aan om de prijs op te zoeken${navigator.onLine ? '' : ' (zodra er bereik is)'}.</small></div></div>` +
+    q.map((x, k) => `<div class="card wq" data-k="${k}"><img src="${x.shot}" alt=""><div class="body">
+      <div class="art">${esc(x.query || '(geen tekst gelezen)')}</div>
+      <div class="meta">${new Date(x.t).toLocaleString('nl-BE')}</div>
+      <div class="meta" style="color:var(--acc)">Tik om op te zoeken · <span class="wqdel" data-k="${k}">verwijderen</span></div></div></div>`).join('');
+  out.querySelectorAll('.card.wq').forEach(c => c.onclick = async e => {
+    const k = +c.dataset.k;
+    const lijst = (await DB.get('prijsWachtrij')) || [];
+    const x = lijst[k]; if (!x) return;
+    lijst.splice(k, 1); await DB.set('prijsWachtrij', lijst); zetWachtKnop();
+    if (e.target.classList.contains('wqdel')) { toonWachtrij(); return; }
+    if (!navigator.onLine) { lijst.splice(k, 0, x); await DB.set('prijsWachtrij', lijst); zetWachtKnop(); toast('Nog geen internet.'); return; }
+    PRIJS = { shot: x.shot, fp: x.fp, termen: x.termen, query: x.query, status: 'zoeken', res: [], open: null };
+    render(); prijsZoek(x.termen);
+  });
+  window.scrollTo(0, 0);
+}
+
 /* ───────────────────────── Vergroten ───────────────────────── */
 async function toonGroot(img) {
   const z = document.getElementById('zoom'), zi = document.getElementById('zoomImg');
   zi.src = img.src;                                  // meteen iets tonen
   document.getElementById('zoomTxt').textContent = img.dataset.titel || '';
   resetZoom(); z.classList.add('open');
-  if (img.dataset.tk && img.dataset.groot) {
+  if (img.dataset.srcGroot) { zi.src = img.dataset.srcGroot; }
+  else if (img.dataset.tk && img.dataset.groot) {
     try { const [g] = await DB.thumbs([img.dataset.tk + 'g']); if (g && z.classList.contains('open')) zi.src = g; } catch (e) {}
   }
 }
@@ -1036,14 +1328,29 @@ async function start() {
   document.getElementById('clear').onclick = () => { q.value = ''; FOTO = null; render(); q.focus(); };
   initZoom();
   initCamGebaren();
-  document.getElementById('btnCam').onclick = openCamera;
+  document.getElementById('btnCam').onclick = () => openCamera('collectie');
+  document.getElementById('btnPrijs').onclick = () => openCamera('prijs');
+  document.getElementById('btnWacht').onclick = toonWachtrij;
+  zetWachtKnop();
+  document.getElementById('btnDgSave').onclick = async () => {
+    const t = document.getElementById('dgToken').value.trim();
+    await DB.set('discogsToken', t);
+    await DB.set('discogsMunt', document.getElementById('dgMunt').value);
+    PRIJS_CACHE.clear();
+    if (!t) { toast('Discogs-token gewist'); return; }
+    try { const me = await dgFetch('/oauth/identity'); toast('✓ Verbonden met Discogs als ' + me.username); document.getElementById('dgStat').textContent = '✓ Verbonden als ' + me.username; }
+    catch (e) { toast('Bewaard, maar controle mislukt: ' + e.message); }
+  };
   document.getElementById('btnKw').onclick = () => { KW_MODUS = !KW_MODUS; FOTO = null; q.value = ''; toonAlles = false; render(); window.scrollTo(0, 0); };
   document.getElementById('camClose').onclick = stopCamera;
   document.getElementById('camShoot').onclick = neemFoto;
   document.getElementById('camLib').onclick = () => { stopCamera(); document.getElementById('fileCam').click(); };
   document.getElementById('fileCam').onchange = e => { fotoUitBestand(e.target.files[0]); e.target.value = ''; };
   const sheet = document.getElementById('settings');
-  document.getElementById('btnSettings').onclick = async () => {
+  document.getElementById('btnSettings').onclick = () => window.openSettings();
+  window.openSettings = async () => {
+    document.getElementById('dgToken').value = (await DB.get('discogsToken')) || '';
+    document.getElementById('dgMunt').value = await munt();
     document.getElementById('url').value = (await DB.get('url')) || '';
     toonStatus(); sheet.classList.add('open');
   };

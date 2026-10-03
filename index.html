@@ -118,6 +118,29 @@ main{padding:12px 16px}
 .zoom img{width:min(96vw,96vh);height:min(96vw,96vh);object-fit:contain;border-radius:6px;transform-origin:center;will-change:transform;user-select:none;-webkit-user-select:none}
 .zoomTxt{position:absolute;left:16px;right:70px;top:calc(18px + var(--safe-t));color:#fff;font-weight:600;font-size:15px;text-shadow:0 1px 3px #000}
 .zoomClose{position:absolute;right:14px;top:calc(10px + var(--safe-t));width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.18);color:#fff;font-size:20px}
+.cam.prijs{background:#2f7d4f;color:#fff;width:52px}
+.kwbtn.wacht{background:var(--maybebg);color:#f6e7b0;border-color:#6d5a1c}
+.kwbtn.wacht span{background:var(--maybe);color:#1b1307}
+.pq{display:flex;gap:8px;margin-top:4px}
+.pq input{flex:1;height:44px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--txt);font-size:16px;padding:0 12px;outline:none;-webkit-appearance:none}
+.pq button{padding:0 16px;border-radius:10px;background:var(--acc);color:#1b1307;font-weight:700}
+.card.pres{cursor:pointer}
+.card.pres.open{border-color:#2f7d4f}
+.pbox{margin-top:8px;background:var(--panel2);border-radius:10px;padding:10px;font-size:14px;color:var(--dim);display:block}
+.spin.sm{width:18px;height:18px;border-width:3px;display:inline-block;vertical-align:-4px;margin:0 6px 0 0}
+.ptrio{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;text-align:center}
+.ptrio div{background:var(--bg);border-radius:8px;padding:7px 4px}
+.ptrio small{display:block;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+.ptrio b{font-size:17px;color:var(--txt)}
+.ptrio .mid b{color:#7ee0a1}
+.ptrio i{display:block;font-style:normal;font-size:11px;color:var(--dim)}
+.psub{font-size:12.5px;margin:9px 0 5px}
+.pgrid{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:3px 10px;font-size:13.5px}
+.pgrid b{color:var(--txt);font-weight:600}
+.pnow{margin-top:9px;font-size:13.5px}
+.pnow b{color:var(--txt)}
+.plink{display:block;margin-top:9px;color:var(--acc);font-size:13.5px;text-decoration:none}
+.wqdel{text-decoration:underline;color:var(--no)}
 .toast{position:fixed;left:16px;right:16px;bottom:calc(20px + var(--safe-b));z-index:50;background:#000;color:#fff;
   border:1px solid var(--line);padding:12px 14px;border-radius:12px;font-size:14.5px;display:none}
 .toast.open{display:block}
@@ -135,9 +158,10 @@ main{padding:12px 16px}
              autocapitalize="off" spellcheck="false" placeholder="Artiest of album…" enterkeyhint="search">
       <button class="clear" id="clear" aria-label="Wissen">✕</button>
     </div>
+    <button class="cam prijs" id="btnPrijs" aria-label="Prijs opzoeken op Discogs">💶</button>
     <button class="cam" id="btnCam" aria-label="Foto van hoes">📷</button>
   </div>
-  <div class="tools"><button class="kwbtn" id="btnKw" style="display:none"></button><span class="hint" id="hint">📷 = foto van de hoes</span></div>
+  <div class="tools"><button class="kwbtn" id="btnKw" style="display:none"></button><button class="kwbtn wacht" id="btnWacht" style="display:none"></button><span class="hint" id="hint">📷 = hebben we die? · 💶 = prijs</span></div>
 </header>
 
 <main id="out"></main>
@@ -157,6 +181,15 @@ main{padding:12px 16px}
     <label>Of: bestand importeren (CSV uit Google Sheets of JSON)</label>
     <input type="file" id="fileImp" accept=".csv,.json,text/csv,application/json" style="display:none">
     <button class="btn sec" id="btnFile">📄 Bestand kiezen…</button>
+
+    <label>Discogs (voor 💶 prijzen — internet nodig)</label>
+    <input id="dgToken" type="text" placeholder="Persoonlijke token van Discogs" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+      <select id="dgMunt" style="flex:1;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--txt);padding:11px 12px;font-size:15px">
+        <option>EUR</option><option>USD</option><option>GBP</option></select>
+    </div>
+    <div class="stat" id="dgStat">Token aanmaken: discogs.com → Settings → Developers → “Generate new token”. Plak hem hierboven.</div>
+    <button class="btn sec" id="btnDgSave">Discogs-token bewaren</button>
 
     <label>Foto-herkenning</label>
     <div class="stat" id="ocrStat">Tekstherkenning wordt bij de eerste foto geladen (±7 MB, blijft daarna offline beschikbaar).</div>
