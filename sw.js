@@ -1,5 +1,5 @@
 /* Service worker: houdt de app volledig offline beschikbaar. */
-const SHELL = 'lpz-shell-v1.8.0';
+const SHELL = 'lpz-shell-v1.8.1';
 const OCR = 'lpz-ocr-v5';   // apart, zodat app-updates de 7 MB niet opnieuw laden
 
 const SHELL_FILES = ['./', 'index.html', 'app.js', 'manifest.webmanifest',

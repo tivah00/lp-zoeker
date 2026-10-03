@@ -3,7 +3,7 @@
  * de app zelf zit in de cache van de service worker. */
 'use strict';
 
-const APP_VERSIE = '1.8.0';
+const APP_VERSIE = '1.8.1';
 const MAX_TONEN = 40;
 const THUMB_PX = 112;
 const GROOT_PX = 720;
@@ -640,6 +640,7 @@ async function leesTekst(cv) {
   return t1 + '\n' + t2;
 }
 async function verwerkFoto(src, rect) {
+  PRIJS = null;
   toonBusy('Hoes vergelijken…');
   try {
     // Uitsnede op vaste grootte
@@ -938,7 +939,7 @@ function renderKw(out, q) {
 
 function renderFoto(out) {
   const { shot, lijst, ocr, ocrFout } = FOTO;
-  let html = '';
+  let html = terugKnop();
   const top = lijst[0];
   if (top && top.s >= 0.85) html += `<div class="verdict v-ok"><span class="big">✓</span><div>Waarschijnlijk hebben we deze al<small>Controleer hieronder of het dezelfde persing is</small></div></div>`;
   else if (top && top.s >= 0.35 && top.art && !top.alb && top.h < 0.3) html += `<div class="verdict v-maybe"><span class="big">?</span><div>Artiest zit in de collectie<small>Maar dit album misschien niet — vergelijk de titels hieronder</small></div></div>`;
@@ -968,6 +969,7 @@ function renderFoto(out) {
     q.value = (q.value ? q.value + ' ' : '') + b.dataset.w; FOTO = null; render();
   });
   document.getElementById('fotoWeg').onclick = () => { FOTO = null; render(); document.getElementById('q').focus(); };
+  koppelTerug();
   vulThumbs();
 }
 
@@ -1224,9 +1226,14 @@ function prijsBlok(d) {
   return html;
 }
 
+function terugKnop() { return `<button class="terug" id="btnTerug">← Terug naar zoeken</button>`; }
+function koppelTerug() {
+  const b = document.getElementById('btnTerug');
+  if (b) b.onclick = () => { PRIJS = null; FOTO = null; KW_MODUS = false; document.getElementById('q').value = ''; render(); window.scrollTo(0, 0); };
+}
 function renderPrijs(out) {
   const P = PRIJS;
-  let html = '';
+  let html = terugKnop();
   if (P.shot) html += `<img class="shot" src="${P.shot}" data-titel="Jouw foto" alt="">`;
   html += `<div class="sect">💶 Prijs opzoeken op Discogs</div>
     <form class="pq" id="pqForm"><input id="pq" type="search" value="${esc(P.query)}" placeholder="artiest, titel of catalogusnr." autocomplete="off" autocorrect="off" spellcheck="false"><button>Zoek</button></form>`;
@@ -1280,6 +1287,7 @@ function renderPrijs(out) {
     const id = +c.dataset.id; if (P.open !== id || !PRIJS_CACHE.has(id)) toonPrijs(id);
   }));
   document.getElementById('prijsNieuw').onclick = () => openCamera('prijs');
+  koppelTerug();
 }
 
 /* Prijs-wachtrij (foto's genomen zonder internet) */
@@ -1299,11 +1307,12 @@ async function toonWachtrij() {
   const q = (await DB.get('prijsWachtrij')) || [];
   const out = document.getElementById('out');
   KW_MODUS = false; FOTO = null; PRIJS = null; document.getElementById('q').value = ''; zetKwKnop();
-  out.innerHTML = `<div class="verdict v-maybe"><span class="big">⏳</span><div>Prijs-wachtrij (${q.length})<small>Foto's genomen zonder internet. Tik er één aan om de prijs op te zoeken${navigator.onLine ? '' : ' (zodra er bereik is)'}.</small></div></div>` +
+  out.innerHTML = terugKnop() + `<div class="verdict v-maybe"><span class="big">⏳</span><div>Prijs-wachtrij (${q.length})<small>Foto's genomen zonder internet. Tik er één aan om de prijs op te zoeken${navigator.onLine ? '' : ' (zodra er bereik is)'}.</small></div></div>` +
     q.map((x, k) => `<div class="card wq" data-k="${k}"><img src="${x.shot}" alt=""><div class="body">
       <div class="art">${esc(x.query || '(geen tekst gelezen)')}</div>
       <div class="meta">${new Date(x.t).toLocaleString('nl-BE')}</div>
       <div class="meta" style="color:var(--acc)">Tik om op te zoeken · <span class="wqdel" data-k="${k}">verwijderen</span></div></div></div>`).join('');
+  koppelTerug();
   out.querySelectorAll('.card.wq').forEach(c => c.onclick = async e => {
     const k = +c.dataset.k;
     const lijst = (await DB.get('prijsWachtrij')) || [];
@@ -1425,7 +1434,7 @@ async function start() {
     try { const me = await dgFetch('/oauth/identity'); toast('✓ Verbonden met Discogs als ' + me.username); document.getElementById('dgStat').textContent = '✓ Verbonden als ' + me.username; }
     catch (e) { toast('Bewaard, maar controle mislukt: ' + e.message); }
   };
-  document.getElementById('btnKw').onclick = () => { KW_MODUS = !KW_MODUS; FOTO = null; q.value = ''; toonAlles = false; render(); window.scrollTo(0, 0); };
+  document.getElementById('btnKw').onclick = () => { KW_MODUS = !KW_MODUS; FOTO = null; PRIJS = null; q.value = ''; toonAlles = false; render(); window.scrollTo(0, 0); };
   document.getElementById('camClose').onclick = stopCamera;
   document.getElementById('camShoot').onclick = neemFoto;
   document.getElementById('camLib').onclick = () => { stopCamera(); document.getElementById('fileCam').click(); };
