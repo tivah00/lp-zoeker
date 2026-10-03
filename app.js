@@ -3,7 +3,7 @@
  * de app zelf zit in de cache van de service worker. */
 'use strict';
 
-const APP_VERSIE = '1.5.0';
+const APP_VERSIE = '1.6.0';
 const MAX_TONEN = 40;
 const THUMB_PX = 112;
 const GROOT_PX = 720;
@@ -675,45 +675,115 @@ async function verwerkFoto(src, rect) {
 
 /* ───────────────────────── Camera ───────────────────────── */
 let stream = null;
+/* Zoom: hardware-zoom van de iPhone als die beschikbaar is (o.a. 0,5× groothoek),
+ * anders digitale zoom (enkel inzoomen). */
+let CAMZ = { hw: null, min: 1, max: 4, z: 1 };
 async function openCamera() {
   if (!LIB.length) { toast('Nog geen bibliotheek geladen (⚙︎).'); return; }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { document.getElementById('fileCam').click(); return; }
   const cv = document.getElementById('camview');
   const video = document.getElementById('video');
   try {
+    // 4:3 = volledige sensor (16:9 snijdt bij, waardoor het beeld "ingezoomd" lijkt)
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 } },
+      audio: false
     });
     video.srcObject = stream;
     cv.classList.add('open');
     await video.play().catch(() => {});
+    await initCamZoom();
+    plaatsKader();
     ocrWorker().catch(() => {}); // alvast opwarmen
   } catch (e) {
     stopCamera();
     document.getElementById('fileCam').click();
   }
 }
+async function initCamZoom() {
+  const track = stream && stream.getVideoTracks()[0];
+  let cap = {};
+  try { cap = (track && track.getCapabilities) ? track.getCapabilities() : {}; } catch (e) {}
+  if (cap.zoom && cap.zoom.max > cap.zoom.min) {
+    CAMZ = { hw: track, min: cap.zoom.min, max: Math.min(cap.zoom.max, 6), z: cap.zoom.min };
+  } else {
+    CAMZ = { hw: null, min: 1, max: 4, z: 1 };
+  }
+  await zetCamZoom(CAMZ.min);
+  const stappen = [CAMZ.min, 1, 2, 3].filter((v, i, a) => v >= CAMZ.min && v <= CAMZ.max && a.indexOf(v) === i);
+  const bar = document.getElementById('zoombar');
+  bar.innerHTML = stappen.map(v => `<button data-z="${v}">${String(+v.toFixed(1)).replace('.', ',')}×</button>`).join('');
+  bar.querySelectorAll('button').forEach(btn => btn.onclick = () => zetCamZoom(+btn.dataset.z));
+  markeerZoom();
+}
+async function zetCamZoom(z) {
+  z = Math.max(CAMZ.min, Math.min(CAMZ.max, z));
+  CAMZ.z = z;
+  const video = document.getElementById('video');
+  if (CAMZ.hw) {
+    try { await CAMZ.hw.applyConstraints({ advanced: [{ zoom: z }] }); video.style.transform = ''; }
+    catch (e) { CAMZ.hw = null; CAMZ.min = 1; video.style.transform = `scale(${Math.max(1, z)})`; }
+  } else {
+    video.style.transform = z > 1 ? `scale(${z})` : '';
+  }
+  markeerZoom();
+}
+function markeerZoom() {
+  document.querySelectorAll('#zoombar button').forEach(b => b.classList.toggle('on', Math.abs(+b.dataset.z - CAMZ.z) < 0.05));
+}
+/** Zichtbaar videovlak (object-fit: contain) in schermcoördinaten, zonder digitale zoom. */
+function videoVlak() {
+  const v = document.getElementById('video');
+  const vw = v.videoWidth || 4, vh = v.videoHeight || 3;
+  const W = v.clientWidth, H = v.clientHeight, sc = Math.min(W / vw, H / vh);
+  const L = v.offsetLeft + (W - vw * sc) / 2, T = v.offsetTop + (H - vh * sc) / 2;
+  return { L, T, w: vw * sc, h: vh * sc, sc, W, H };
+}
+function plaatsKader() {
+  const g = document.querySelector('.guide');
+  const r = videoVlak();
+  const s = Math.min(r.w, r.h) * 0.94;
+  Object.assign(g.style, { left: (r.L + (r.w - s) / 2) + 'px', top: (r.T + (r.h - s) / 2) + 'px', width: s + 'px', height: s + 'px' });
+}
 function stopCamera() {
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null;
+  document.getElementById('video').style.transform = '';
   document.getElementById('camview').classList.remove('open');
 }
 function neemFoto() {
   const video = document.getElementById('video');
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw) return;
-  const W = video.clientWidth, H = video.clientHeight;
-  const sc = Math.max(W / vw, H / vh);
-  const ox = (W - vw * sc) / 2, oy = (H - vh * sc) / 2;
+  const r = videoVlak();
+  const dz = CAMZ.hw ? 1 : Math.max(1, CAMZ.z);              // digitale zoom: kader beslaat kleiner deel
   const g = document.querySelector('.guide').getBoundingClientRect();
-  const vr = video.getBoundingClientRect();
-  let sx = (g.left - vr.left - ox) / sc, sy = (g.top - vr.top - oy) / sc, s = g.width / sc;
+  const cv = document.getElementById('camview').getBoundingClientRect();
+  const cx = r.L + r.w / 2, cy = r.T + r.h / 2;              // zoom-centrum (schermcoörd. binnen camview)
+  const gx = g.left - cv.left, gy = g.top - cv.top;
+  let sx = ((cx + (gx - cx) / dz) - r.L) / r.sc;
+  let sy = ((cy + (gy - cy) / dz) - r.T) / r.sc;
+  let s = (g.width / dz) / r.sc;
   s = Math.min(s, vw, vh); sx = Math.max(0, Math.min(vw - s, sx)); sy = Math.max(0, Math.min(vh - s, sy));
   const snap = document.createElement('canvas');
   snap.width = vw; snap.height = vh;
   snap.getContext('2d').drawImage(video, 0, 0, vw, vh);
   stopCamera();
   verwerkFoto(snap, [sx, sy, s, s]);
+}
+function initCamGebaren() {
+  const cvw = document.getElementById('camview');
+  let st = null;
+  const afst = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  cvw.addEventListener('touchstart', e => { if (e.touches.length === 2) st = { d: afst(e.touches), z: CAMZ.z }; }, { passive: true });
+  cvw.addEventListener('touchmove', e => {
+    if (!st || e.touches.length !== 2) return;
+    e.preventDefault();
+    zetCamZoom(st.z * afst(e.touches) / st.d);
+  }, { passive: false });
+  cvw.addEventListener('touchend', e => { if (e.touches.length < 2) st = null; });
+  window.addEventListener('resize', () => { if (stream) plaatsKader(); });
+  document.getElementById('video').addEventListener('loadedmetadata', () => { if (stream) plaatsKader(); });
 }
 async function fotoUitBestand(file) {
   if (!file) return;
@@ -965,6 +1035,7 @@ async function start() {
   q.addEventListener('keydown', e => { if (e.key === 'Enter') q.blur(); });
   document.getElementById('clear').onclick = () => { q.value = ''; FOTO = null; render(); q.focus(); };
   initZoom();
+  initCamGebaren();
   document.getElementById('btnCam').onclick = openCamera;
   document.getElementById('btnKw').onclick = () => { KW_MODUS = !KW_MODUS; FOTO = null; q.value = ''; toonAlles = false; render(); window.scrollTo(0, 0); };
   document.getElementById('camClose').onclick = stopCamera;

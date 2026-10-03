@@ -95,12 +95,15 @@ main{padding:12px 16px}
 .prog{height:6px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:10px;display:none}
 .prog i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
 /* Camera */
-.camview{position:fixed;inset:0;z-index:30;background:#000;display:none;flex-direction:column}
+.camview{position:fixed;inset:0;z-index:30;background:#000;display:none;flex-direction:column;overflow:hidden}
 .camview.open{display:flex}
-.camview video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-.guide{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);width:78vw;max-width:420px;aspect-ratio:1;
+.camview video{position:absolute;left:0;right:0;top:calc(52px + var(--safe-t));bottom:calc(178px + var(--safe-b));width:100%;height:calc(100% - 230px - var(--safe-t) - var(--safe-b));object-fit:contain;transform-origin:center;touch-action:none}
+.guide{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;
   border:3px solid rgba(255,255,255,.9);border-radius:10px;box-shadow:0 0 0 100vmax rgba(0,0,0,.45)}
 .camtxt{position:absolute;left:0;right:0;top:calc(18px + var(--safe-t));text-align:center;color:#fff;font-size:15px;padding:0 20px;text-shadow:0 1px 3px #000}
+.zoombar{position:absolute;left:0;right:0;bottom:calc(122px + var(--safe-b));display:flex;justify-content:center;gap:10px}
+.zoombar button{min-width:46px;height:34px;border-radius:17px;background:rgba(255,255,255,.16);color:#fff;font-size:14px;font-weight:600;padding:0 10px}
+.zoombar button.on{background:#fff;color:#000}
 .camctl{position:absolute;left:0;right:0;bottom:calc(28px + var(--safe-b));display:flex;justify-content:space-around;align-items:center}
 .shutter{width:76px;height:76px;border-radius:50%;background:#fff;border:5px solid rgba(255,255,255,.4);background-clip:padding-box}
 .camctl .icon-btn{background:rgba(255,255,255,.18);color:#fff;width:52px;height:52px;border-radius:50%}
@@ -167,7 +170,8 @@ main{padding:12px 16px}
 <div class="camview" id="camview">
   <video id="video" playsinline muted autoplay></video>
   <div class="guide"></div>
-  <div class="camtxt">Houd de hoes binnen het kader</div>
+  <div class="camtxt">Hoes binnen het kader · knijp om te zoomen</div>
+  <div class="zoombar" id="zoombar"></div>
   <div class="camctl">
     <button class="icon-btn" id="camClose" aria-label="Sluiten">✕</button>
     <button class="shutter" id="camShoot" aria-label="Foto nemen"></button>
