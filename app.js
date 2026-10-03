@@ -3,7 +3,7 @@
  * de app zelf zit in de cache van de service worker. */
 'use strict';
 
-const APP_VERSIE = '1.7.0';
+const APP_VERSIE = '1.8.0';
 const MAX_TONEN = 40;
 const THUMB_PX = 112;
 const GROOT_PX = 720;
@@ -1031,8 +1031,21 @@ async function dgZoek(query) {
     if (r.results && r.results.length) return { res: r.results, via: 'barcode ' + query.barcode };
   }
   for (const c of query.catnos || []) {
+    if (query.artiest) {
+      const r = await dgFetch('/database/search', { ...basis, catno: c, artist: query.artiest });
+      if (r.results && r.results.length) return { res: r.results, via: 'catalogusnr. ' + c + ' + artiest' };
+    }
     const r = await dgFetch('/database/search', { ...basis, catno: c });
     if (r.results && r.results.length && r.results.length < 25) return { res: r.results, via: 'catalogusnr. ' + c };
+  }
+  if (query.artiest && query.titel) {
+    const r = await dgFetch('/database/search', { ...basis, artist: query.artiest, release_title: query.titel });
+    if (r.results && r.results.length) return { res: r.results, via: 'artiest + titel' };
+  }
+  if (query.artiest || query.titel) {
+    const q = [query.artiest, query.titel].filter(Boolean).join(' ');
+    const r = await dgFetch('/database/search', { ...basis, q });
+    if (r.results && r.results.length) return { res: r.results, via: '“' + q + '”' };
   }
   const w = query.woorden || [];
   const pogingen = [w.slice(0, 7), w.slice(0, 5), [...w].sort((a, b) => b.length - a.length).slice(0, 3), w.slice(0, 2)]
@@ -1088,20 +1101,66 @@ function inCollectie(titel) {
     (it._nb === b || it._nb.includes(b) || b.includes(it._nb))) || null;
 }
 
+/* Herkenning met Claude (optioneel, eigen API-sleutel; enkel online gebruikt). */
+const CLAUDE_PROMPT = `Dit is een foto van een vinyl-platenhoes (voorkant, achterkant of label) in een tweedehandswinkel.
+Lees zorgvuldig wat er staat en geef ENKEL een JSON-object terug, zonder uitleg, met deze velden:
+{"artiest": "", "titel": "", "label": "", "catno": "", "barcode": "", "jaar": "", "land": "", "zeker": 0.0}
+- "catno" = catalogusnummer precies zoals gedrukt (bv. "SHVL 804", "2C 068-04231"), leeg als niet zichtbaar
+- "barcode" = enkel de cijfers onder een streepjescode, anders leeg
+- Vul alleen in wat je echt kan lezen of met grote zekerheid herkent; anders een lege string
+- "zeker" = je zekerheid (0-1) dat artiest + titel kloppen`;
+async function herkenMetClaude(dataUrl) {
+  const key = await DB.get('claudeKey');
+  if (!key) return null;
+  const model = (await DB.get('claudeModel')) || 'claude-sonnet-5';
+  const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', signal: ctrl.signal,
+      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model, max_tokens: 400, messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: dataUrl.split(',')[1] } },
+        { type: 'text', text: CLAUDE_PROMPT }] }] })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j.error && j.error.message) || ('Claude HTTP ' + r.status));
+    const txt = (j.content || []).map(c => c.text || '').join('');
+    const m = txt.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error('Onverwacht antwoord van Claude');
+    const o = JSON.parse(m[0]);
+    Object.keys(o).forEach(k => { if (typeof o[k] === 'string') o[k] = o[k].trim(); });
+    return o;
+  } finally { clearTimeout(to); }
+}
+
 async function verwerkPrijsFoto(src, rect) {
   const cv = document.createElement('canvas');
   const S = 1100; cv.width = cv.height = S;
   cv.getContext('2d').drawImage(src, rect[0], rect[1], rect[2], rect[3], 0, 0, S, S);
   const shot = cv.toDataURL('image/jpeg', 0.6);
   const fp = vingerafdruk(cv, [0, 0, S, S]);
-  toonBusy('Tekst lezen…');
-  let tekst = '';
-  try { tekst = await leesTekst(cv); } catch (e) {}
-  verbergBus();
-  const termen = zoekTermen(tekst);
   document.getElementById('q').value = '';
   FOTO = null; KW_MODUS = false;
-  PRIJS = { shot, fp, termen, query: termen.woorden.slice(0, 6).join(' '), status: 'zoeken', res: [], open: null };
+  let termen = { barcode: '', catnos: [], woorden: [] }, claude = null, claudeFout = '';
+  if (navigator.onLine && (await DB.get('claudeKey'))) {
+    toonBusy('Hoes lezen met Claude…');
+    try { claude = await herkenMetClaude(cv.toDataURL('image/jpeg', 0.85)); }
+    catch (e) { claudeFout = e.name === 'AbortError' ? 'time-out' : e.message; }
+  }
+  if (claude && (claude.artiest || claude.titel || claude.catno || claude.barcode)) {
+    termen = { artiest: claude.artiest, titel: claude.titel, label: claude.label,
+      catnos: claude.catno ? [claude.catno] : [], barcode: (claude.barcode || '').replace(/\D/g, ''),
+      woorden: toks([claude.artiest, claude.titel].join(' ')) };
+  } else {
+    toonBusy('Tekst lezen…');
+    let tekst = '';
+    try { tekst = await leesTekst(cv); } catch (e) {}
+    termen = zoekTermen(tekst);
+  }
+  verbergBusy();
+  const query = termen.artiest || termen.titel ? [termen.artiest, termen.titel].filter(Boolean).join(' – ') : termen.woorden.slice(0, 6).join(' ');
+  PRIJS = { shot, fp, termen, query, status: 'zoeken', res: [], open: null, claude, claudeFout };
   if (!navigator.onLine) {
     await bewaarInWachtrij(PRIJS);
     PRIJS.status = 'offline';
@@ -1171,7 +1230,14 @@ function renderPrijs(out) {
   if (P.shot) html += `<img class="shot" src="${P.shot}" data-titel="Jouw foto" alt="">`;
   html += `<div class="sect">💶 Prijs opzoeken op Discogs</div>
     <form class="pq" id="pqForm"><input id="pq" type="search" value="${esc(P.query)}" placeholder="artiest, titel of catalogusnr." autocomplete="off" autocorrect="off" spellcheck="false"><button>Zoek</button></form>`;
-  if (P.via) html += `<div class="meta" style="color:var(--dim);font-size:12.5px;margin-top:6px">Gevonden via ${esc(P.via)}</div>`;
+  if (P.claude) {
+    const c = P.claude;
+    html += `<div class="meta" style="font-size:12.5px;margin-top:6px;color:#cfe5ff">🤖 Claude las: ${esc([c.artiest, c.titel].filter(Boolean).join(' – ') || '—')}${c.catno ? ' · ' + esc(c.catno) : ''}${c.zeker !== undefined && c.zeker < 0.6 ? ' <span style="color:var(--maybe)">(onzeker)</span>' : ''}</div>`;
+  } else if (P.claudeFout) {
+    html += `<div class="meta" style="font-size:12.5px;margin-top:6px;color:var(--maybe)">Claude niet gelukt (${esc(P.claudeFout)}) — gewone tekstherkenning gebruikt</div>`;
+  }
+  if (P.via) html += `<div class="meta" style="color:var(--dim);font-size:12.5px;margin-top:4px">Gevonden via ${esc(P.via)}</div>`;
+  html += `<div class="meta" style="color:var(--dim);font-size:12.5px;margin-top:4px">Fout gelezen? Tik in het zoekveld → <b>Scan tekst</b> (iPhone) en richt op titel of catalogusnr.</div>`;
   html += `<div style="clear:both"></div>`;
   if (P.status === 'offline') {
     html += `<div class="verdict v-maybe"><span class="big">📶</span><div>Geen internet<small>Foto bewaard in de prijs-wachtrij. Zodra je bereik hebt kan je hem opzoeken via ⏳ hieronder.</small></div></div>`;
@@ -1203,7 +1269,9 @@ function renderPrijs(out) {
     const v = document.getElementById('pq').value.trim(); if (!v) return;
     document.getElementById('pq').blur();
     P.query = v; P.via = '';
-    const t = zoekTermen(v); t.woorden = toks(v).filter(w => w.length > 1); 
+    const t = zoekTermen(v); t.woorden = toks(v).filter(w => w.length > 1);
+    const delen = v.split(/\s+[–—-]\s+/);
+    if (delen.length === 2) { t.artiest = delen[0].trim(); t.titel = delen[1].trim(); }
     if (/\d{3,}/.test(v) && t.woorden.length <= 1) t.catnos = [v];
     prijsZoek(t);
   };
@@ -1243,8 +1311,19 @@ async function toonWachtrij() {
     lijst.splice(k, 1); await DB.set('prijsWachtrij', lijst); zetWachtKnop();
     if (e.target.classList.contains('wqdel')) { toonWachtrij(); return; }
     if (!navigator.onLine) { lijst.splice(k, 0, x); await DB.set('prijsWachtrij', lijst); zetWachtKnop(); toast('Nog geen internet.'); return; }
-    PRIJS = { shot: x.shot, fp: x.fp, termen: x.termen, query: x.query, status: 'zoeken', res: [], open: null };
-    render(); prijsZoek(x.termen);
+    let termen = x.termen, query = x.query, claude = null, claudeFout = '';
+    if (await DB.get('claudeKey')) {
+      toonBusy('Hoes lezen met Claude…');
+      try { claude = await herkenMetClaude(x.shot); } catch (err) { claudeFout = err.message; }
+      verbergBusy();
+      if (claude && (claude.artiest || claude.titel || claude.catno)) {
+        termen = { artiest: claude.artiest, titel: claude.titel, catnos: claude.catno ? [claude.catno] : [],
+          barcode: (claude.barcode || '').replace(/\D/g, ''), woorden: toks([claude.artiest, claude.titel].join(' ')) };
+        query = [claude.artiest, claude.titel].filter(Boolean).join(' – ');
+      }
+    }
+    PRIJS = { shot: x.shot, fp: x.fp, termen, query, status: 'zoeken', res: [], open: null, claude, claudeFout };
+    render(); prijsZoek(termen);
   });
   window.scrollTo(0, 0);
 }
@@ -1332,6 +1411,11 @@ async function start() {
   document.getElementById('btnPrijs').onclick = () => openCamera('prijs');
   document.getElementById('btnWacht').onclick = toonWachtrij;
   zetWachtKnop();
+  document.getElementById('btnClSave').onclick = async () => {
+    const k = document.getElementById('clKey').value.trim();
+    await DB.set('claudeKey', k); await DB.set('claudeModel', document.getElementById('clModel').value);
+    toast(k ? '✓ Claude-sleutel bewaard' : 'Claude-sleutel gewist');
+  };
   document.getElementById('btnDgSave').onclick = async () => {
     const t = document.getElementById('dgToken').value.trim();
     await DB.set('discogsToken', t);
@@ -1351,6 +1435,8 @@ async function start() {
   window.openSettings = async () => {
     document.getElementById('dgToken').value = (await DB.get('discogsToken')) || '';
     document.getElementById('dgMunt').value = await munt();
+    document.getElementById('clKey').value = (await DB.get('claudeKey')) || '';
+    document.getElementById('clModel').value = (await DB.get('claudeModel')) || 'claude-sonnet-5';
     document.getElementById('url').value = (await DB.get('url')) || '';
     toonStatus(); sheet.classList.add('open');
   };

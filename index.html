@@ -191,6 +191,14 @@ main{padding:12px 16px}
     <div class="stat" id="dgStat">Token aanmaken: discogs.com → Settings → Developers → “Generate new token”. Plak hem hierboven.</div>
     <button class="btn sec" id="btnDgSave">Discogs-token bewaren</button>
 
+    <label>Betere herkenning met Claude (optioneel, voor 💶)</label>
+    <input id="clKey" type="password" placeholder="Anthropic API-sleutel (sk-ant-…)" autocomplete="off">
+    <select id="clModel" style="width:100%;margin-top:8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--txt);padding:11px 12px;font-size:15px">
+      <option value="claude-sonnet-5">Claude Sonnet 5 (beste, ±0,4 cent/foto)</option>
+      <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (goedkoper, ±0,2 cent/foto)</option></select>
+    <div class="stat">Sleutel aanmaken op platform.claude.com → API keys. Blijft enkel op dit toestel. Zonder sleutel gebruikt de app de gewone tekstherkenning.</div>
+    <button class="btn sec" id="btnClSave">Claude-sleutel bewaren</button>
+
     <label>Foto-herkenning</label>
     <div class="stat" id="ocrStat">Tekstherkenning wordt bij de eerste foto geladen (±7 MB, blijft daarna offline beschikbaar).</div>
     <button class="btn sec" id="btnPreload">Tekstherkenning nu al klaarzetten</button>
